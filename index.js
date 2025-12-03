@@ -30,20 +30,20 @@ const fileWaitList = new Set();
 let globalSqTarget = null;
 
 const MAIN_KEYBOARD = Markup.keyboard([
-     ['/ck 查看发言日志', '/bz 指令菜单'],
-    ['/id ID查询', '/img 文件转图片'],
+    ['/ck 查看日志', '/bz 指令菜单'],
+    ['/id ID查询', '/img 转图片模式'],
     ['/cksq 授权管理', '/sj 数据库检测']
 ]).resize().persistent();
 
 const NO_AUTH_MSG = `
-⛔️ <b>访问被拒绝 </b>
+⛔️ <b>访问被拒绝 (Access Denied)</b>
 
 你还没有获得授权，请授权后再试。
 如有疑问请联系管理员 @rrss0
 `;
 
 const LOW_PERM_MSG = `
-⛔️ <b>权限不足 </b>
+⛔️ <b>权限不足 (Permission Denied)</b>
 
 你没有操作该功能的权限，请联系管理员。
 如有疑问请联系管理员 @rrss0
@@ -75,6 +75,15 @@ async function initDB() {
                 is_permanent BOOLEAN DEFAULT FALSE
             );
         `);
+        // 新增：邀请链接存储表
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS invite_links (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                link TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
     } catch (err) {
         console.error(err);
     } finally {
@@ -103,19 +112,30 @@ async function notifyAdmin(title, ctx, extraInfo = '') {
 }
 
 async function logMessage(ctx, eventType, oldContent = null) {
-    const msg = ctx.message || ctx.editedMessage;
-    if (!msg || ctx.chat.type === 'private') return;
+    const msg = ctx.message || ctx.editedMessage || ctx.myChatMember || ctx.chatMember; // 兼容不同类型的更新
+    
+    // 如果是私聊，且不是特殊的系统事件，则不记录
+    if (!msg || (ctx.chat && ctx.chat.type === 'private')) return;
 
-    const content = msg.text || msg.caption || `[媒体消息]`;
-    const chatTitle = msg.chat.title || '未知群组';
-    const username = msg.from.username || '';
-    const firstName = msg.from.first_name || '';
+    // 处理系统消息内容
+    let content = '';
+    if (eventType === 'system') {
+        content = oldContent || '[系统事件]';
+    } else {
+        content = msg.text || msg.caption || `[媒体消息]`;
+    }
+
+    const chatTitle = ctx.chat ? ctx.chat.title : '未知群组';
+    const userId = ctx.from ? ctx.from.id : 0;
+    const username = ctx.from ? (ctx.from.username || '') : '';
+    const firstName = ctx.from ? (ctx.from.first_name || '') : '';
+    const msgId = msg.message_id || 0;
 
     try {
         await pool.query(
             `INSERT INTO messages (msg_id, chat_id, chat_title, user_id, username, first_name, content, event, original_content)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-            [msg.message_id, msg.chat.id, chatTitle, msg.from.id, username, firstName, content, eventType, oldContent]
+            [msgId, ctx.chat.id, chatTitle, userId, username, firstName, content, eventType, oldContent]
         );
     } catch (e) {
         console.error(e);
@@ -156,13 +176,22 @@ async function isUserInChat(userId, chatId) {
     }
 }
 
+// 1. 指令权限拦截 (群内非管理员禁止使用指令)
 bot.use(async (ctx, next) => {
     if (ctx.chat && ctx.chat.type !== 'private' && ctx.message && ctx.message.text && ctx.message.text.startsWith('/')) {
         if (ctx.from.id !== ADMIN_ID) {
-            return ctx.reply('⛔️ 你还没有权限 ⛔️');
+            return ctx.reply('⛔️ 你没有权限 ⛔️');
         }
     }
     await next();
+});
+
+// 2. 监听机器人被加入群组/状态变更 (解决群组不显示问题)
+bot.on('my_chat_member', async (ctx) => {
+    const status = ctx.myChatMember.new_chat_member.status;
+    const chatTitle = ctx.chat.title;
+    // 只要状态变化，就记录一条系统日志，确保数据库里有这个群的ID
+    await logMessage(ctx, 'system', `机器人状态变更: ${status}`);
 });
 
 bot.on('message', async (ctx, next) => {
@@ -192,7 +221,7 @@ bot.use(async (ctx, next) => {
 });
 
 bot.start(async (ctx) => {
-    await ctx.reply('👋 欢迎使用。', MAIN_KEYBOARD);
+    await ctx.reply('👋 欢迎使用系统，键盘已激活。', MAIN_KEYBOARD);
 });
 
 bot.command('ck', async (ctx) => {
@@ -228,8 +257,54 @@ bot.command('bz', adminOnly, async (ctx) => {
 /cksq - 查看和撤销已授权用户
 /sj - 数据库检测与一键重置
 /sc - 选择删除某个群的记录
-/qc - 强制清空所有数据库`;
+/qc - 强制清空所有数据库
+/lj - 生成本群永久邀请链接
+/sx - 使所有生成的链接失效`;
     await ctx.reply(text, { parse_mode: 'Markdown' });
+});
+
+// 新增功能：生成链接
+bot.command('lj', adminOnly, async (ctx) => {
+    if (ctx.chat.type === 'private') return ctx.reply('❌ 请在群组中使用此指令。');
+    
+    try {
+        const invite = await ctx.telegram.createChatInviteLink(ctx.chat.id, {
+            name: '官方邀请',
+            expire_date: 0, // 永不过期
+            member_limit: 0 // 无限制
+        });
+        
+        await pool.query('INSERT INTO invite_links (chat_id, link) VALUES ($1, $2)', [ctx.chat.id, invite.invite_link]);
+        
+        await ctx.reply(`🔗 **邀请链接已生成**\n\n${invite.invite_link}\n\n(此链接永久有效，输入 /sx 可一键作废)`, { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error(e);
+        ctx.reply('❌ 生成失败，请检查机器人是否为管理员权限。');
+    }
+});
+
+// 新增功能：链接失效
+bot.command('sx', adminOnly, async (ctx) => {
+    try {
+        const res = await pool.query('SELECT * FROM invite_links');
+        if (res.rows.length === 0) return ctx.reply('📭 当前没有已记录的活跃链接。');
+        
+        let count = 0;
+        for (const row of res.rows) {
+            try {
+                await ctx.telegram.revokeChatInviteLink(row.chat_id, row.link);
+                count++;
+            } catch (e) {
+                // 可能链接已经被删了或者机器人不在群里了，忽略错误
+            }
+        }
+        
+        await pool.query('DELETE FROM invite_links'); // 清空记录
+        await ctx.reply(`✅ 已执行失效操作。\n共撤销了 ${count} 个邀请链接。`);
+    } catch (e) {
+        console.error(e);
+        ctx.reply('❌ 操作部分失败，请查看日志。');
+    }
 });
 
 bot.command('sj', adminOnly, async (ctx) => {
@@ -245,7 +320,7 @@ bot.command('sj', adminOnly, async (ctx) => {
         {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-                [Markup.button.callback('🔥 永久删除', 'do_reset_db')],
+                [Markup.button.callback('🔥 永久删除 (重置为新)', 'do_reset_db')],
                 [Markup.button.callback('🔙 取消', 'cancel_action')]
             ])
         }
@@ -606,6 +681,7 @@ bot.action(/export_(group|user)_([\w@-]+)/, async (ctx) => {
     content += `🔢 总消息数: ${totalCount} 条\n`;
     content += `✏️ 编辑次数: ${editCount} 次\n`;
     content += `👥 参与用户: ${uniqueUsers.join(', ')}\n`;
+    content += `⚠️ 说明: 因官方限制，无法记录已删除消息。\n`;
     content += `==================================================\n\n`;
     content += `[记录开始]\n\n`;
 
