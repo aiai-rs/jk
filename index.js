@@ -29,6 +29,20 @@ const fileCache = new Map();
 const fileWaitList = new Set();
 let globalSqTarget = null;
 
+// --- 全局防崩溃系统 ---
+bot.catch((err, ctx) => {
+    console.error(`Error for ${ctx.updateType}`, err);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection:', reason);
+});
+// --------------------
+
 const MAIN_KEYBOARD = Markup.keyboard([
     ['/ck 查看发言日志', '/bz 指令菜单'],
     ['/id ID查询', '/img 文件转图片'],
@@ -176,7 +190,7 @@ async function isUserInChat(userId, chatId) {
 bot.use(async (ctx, next) => {
     if (ctx.chat && ctx.chat.type !== 'private' && ctx.message && ctx.message.text && ctx.message.text.startsWith('/')) {
         if (ctx.from.id !== ADMIN_ID) {
-            return ctx.reply('⛔️ 你没有权限 ⛔️');
+            return ctx.reply('⛔️ 你还没有权限 ⛔️');
         }
     }
     await next();
