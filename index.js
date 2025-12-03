@@ -30,8 +30,8 @@ const fileWaitList = new Set();
 let globalSqTarget = null;
 
 const MAIN_KEYBOARD = Markup.keyboard([
-    ['/ck 查看日志', '/bz 指令菜单'],
-    ['/id ID查询', '/img 转图片模式'],
+    ['/ck 查看发言日志', '/bz 指令菜单'],
+    ['/id ID查询', '/img 文件转图片'],
     ['/cksq 授权管理', '/sj 数据库检测']
 ]).resize().persistent();
 
@@ -75,7 +75,6 @@ async function initDB() {
                 is_permanent BOOLEAN DEFAULT FALSE
             );
         `);
-        // 新增：邀请链接存储表
         await client.query(`
             CREATE TABLE IF NOT EXISTS invite_links (
                 id SERIAL PRIMARY KEY,
@@ -112,12 +111,10 @@ async function notifyAdmin(title, ctx, extraInfo = '') {
 }
 
 async function logMessage(ctx, eventType, oldContent = null) {
-    const msg = ctx.message || ctx.editedMessage || ctx.myChatMember || ctx.chatMember; // 兼容不同类型的更新
+    const msg = ctx.message || ctx.editedMessage || ctx.myChatMember || ctx.chatMember;
     
-    // 如果是私聊，且不是特殊的系统事件，则不记录
     if (!msg || (ctx.chat && ctx.chat.type === 'private')) return;
 
-    // 处理系统消息内容
     let content = '';
     if (eventType === 'system') {
         content = oldContent || '[系统事件]';
@@ -176,7 +173,6 @@ async function isUserInChat(userId, chatId) {
     }
 }
 
-// 1. 指令权限拦截 (群内非管理员禁止使用指令)
 bot.use(async (ctx, next) => {
     if (ctx.chat && ctx.chat.type !== 'private' && ctx.message && ctx.message.text && ctx.message.text.startsWith('/')) {
         if (ctx.from.id !== ADMIN_ID) {
@@ -186,11 +182,8 @@ bot.use(async (ctx, next) => {
     await next();
 });
 
-// 2. 监听机器人被加入群组/状态变更 (解决群组不显示问题)
 bot.on('my_chat_member', async (ctx) => {
     const status = ctx.myChatMember.new_chat_member.status;
-    const chatTitle = ctx.chat.title;
-    // 只要状态变化，就记录一条系统日志，确保数据库里有这个群的ID
     await logMessage(ctx, 'system', `机器人状态变更: ${status}`);
 });
 
@@ -221,7 +214,7 @@ bot.use(async (ctx, next) => {
 });
 
 bot.start(async (ctx) => {
-    await ctx.reply('👋 欢迎使用系统，键盘已激活。', MAIN_KEYBOARD);
+    await ctx.reply('👋 欢迎使用。', MAIN_KEYBOARD);
 });
 
 bot.command('ck', async (ctx) => {
@@ -263,27 +256,25 @@ bot.command('bz', adminOnly, async (ctx) => {
     await ctx.reply(text, { parse_mode: 'Markdown' });
 });
 
-// 新增功能：生成链接
 bot.command('lj', adminOnly, async (ctx) => {
     if (ctx.chat.type === 'private') return ctx.reply('❌ 请在群组中使用此指令。');
     
     try {
         const invite = await ctx.telegram.createChatInviteLink(ctx.chat.id, {
             name: '官方邀请',
-            expire_date: 0, // 永不过期
-            member_limit: 0 // 无限制
+            expire_date: 0,
+            member_limit: 0
         });
         
         await pool.query('INSERT INTO invite_links (chat_id, link) VALUES ($1, $2)', [ctx.chat.id, invite.invite_link]);
         
-        await ctx.reply(`🔗 **邀请链接已生成**\n\n${invite.invite_link}\n\n(此链接永久有效，输入 /sx 可一键作废)`, { parse_mode: 'Markdown' });
+        await ctx.reply(`🔗 **邀请链接已生成**\n\n${invite.invite_link}\n\n(此链接永久有效)`, { parse_mode: 'Markdown' });
     } catch (e) {
         console.error(e);
         ctx.reply('❌ 生成失败，请检查机器人是否为管理员权限。');
     }
 });
 
-// 新增功能：链接失效
 bot.command('sx', adminOnly, async (ctx) => {
     try {
         const res = await pool.query('SELECT * FROM invite_links');
@@ -295,11 +286,10 @@ bot.command('sx', adminOnly, async (ctx) => {
                 await ctx.telegram.revokeChatInviteLink(row.chat_id, row.link);
                 count++;
             } catch (e) {
-                // 可能链接已经被删了或者机器人不在群里了，忽略错误
             }
         }
         
-        await pool.query('DELETE FROM invite_links'); // 清空记录
+        await pool.query('DELETE FROM invite_links');
         await ctx.reply(`✅ 已执行失效操作。\n共撤销了 ${count} 个邀请链接。`);
     } catch (e) {
         console.error(e);
@@ -599,6 +589,16 @@ bot.action(/view_group_(-?\d+)/, async (ctx) => {
     await sendLogPage(ctx, 'group', targetChatId, 1);
 });
 
+bot.action('back_to_group_list', async (ctx) => {
+    const res = await pool.query('SELECT DISTINCT chat_id, chat_title FROM messages WHERE chat_id < 0');
+    if (res.rows.length === 0) return ctx.answerCbQuery('📭 暂无记录', true);
+    
+    const buttons = res.rows.map(g => [
+        Markup.button.callback(`📂 ${g.chat_title}`, `view_group_${g.chat_id}`)
+    ]);
+    await ctx.editMessageText('请选择要查看的群组:', Markup.inlineKeyboard(buttons));
+});
+
 async function sendLogPage(ctx, type, target, page) {
     const limit = 10;
     const offset = (page - 1) * limit;
@@ -631,11 +631,14 @@ async function sendLogPage(ctx, type, target, page) {
         }
     });
 
-    const buttons = [[
-        Markup.button.callback('⬅️ 上页', `page_${type}_${target}_${page - 1}`),
-        Markup.button.callback('⬇️ 导出TXT', `export_${type}_${target}`),
-        Markup.button.callback('下页 ➡️', `page_${type}_${target}_${page + 1}`)
-    ]];
+    const buttons = [
+        [
+            Markup.button.callback('⬅️ 上页', `page_${type}_${target}_${page - 1}`),
+            Markup.button.callback('⬇️ 导出TXT', `export_${type}_${target}`),
+            Markup.button.callback('下页 ➡️', `page_${type}_${target}_${page + 1}`)
+        ],
+        [Markup.button.callback('🔙 返回群组列表', 'back_to_group_list')]
+    ];
 
     if (ctx.callbackQuery) {
         try { await ctx.editMessageText(text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) }); } catch(e){}
@@ -681,7 +684,6 @@ bot.action(/export_(group|user)_([\w@-]+)/, async (ctx) => {
     content += `🔢 总消息数: ${totalCount} 条\n`;
     content += `✏️ 编辑次数: ${editCount} 次\n`;
     content += `👥 参与用户: ${uniqueUsers.join(', ')}\n`;
-    content += `⚠️ 说明: 因官方限制，无法记录已删除消息。\n`;
     content += `==================================================\n\n`;
     content += `[记录开始]\n\n`;
 
