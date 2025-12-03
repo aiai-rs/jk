@@ -36,14 +36,14 @@ const MAIN_KEYBOARD = Markup.keyboard([
 ]).resize().persistent();
 
 const NO_AUTH_MSG = `
-⛔️ <b>访问被拒绝 (Access Denied)</b>
+⛔️ <b>访问被拒绝 </b>
 
 你还没有获得授权，请授权后再试。
 如有疑问请联系管理员 @rrss0
 `;
 
 const LOW_PERM_MSG = `
-⛔️ <b>权限不足 (Permission Denied)</b>
+⛔️ <b>权限不足 </b>
 
 你没有操作该功能的权限，请联系管理员。
 如有疑问请联系管理员 @rrss0
@@ -159,7 +159,7 @@ async function isUserInChat(userId, chatId) {
 bot.use(async (ctx, next) => {
     if (ctx.chat && ctx.chat.type !== 'private' && ctx.message && ctx.message.text && ctx.message.text.startsWith('/')) {
         if (ctx.from.id !== ADMIN_ID) {
-            return ctx.reply('⛔️ 你没有权限 ⛔️');
+            return ctx.reply('⛔️ 你还没有权限 ⛔️');
         }
     }
     await next();
@@ -192,7 +192,7 @@ bot.use(async (ctx, next) => {
 });
 
 bot.start(async (ctx) => {
-    await ctx.reply('👋 欢迎使用系统，键盘已激活。', MAIN_KEYBOARD);
+    await ctx.reply('👋 欢迎使用。', MAIN_KEYBOARD);
 });
 
 bot.command('ck', async (ctx) => {
@@ -245,7 +245,7 @@ bot.command('sj', adminOnly, async (ctx) => {
         {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-                [Markup.button.callback('🔥 永久删除 (重置为新)', 'do_reset_db')],
+                [Markup.button.callback('🔥 永久删除', 'do_reset_db')],
                 [Markup.button.callback('🔙 取消', 'cancel_action')]
             ])
         }
@@ -606,7 +606,6 @@ bot.action(/export_(group|user)_([\w@-]+)/, async (ctx) => {
     content += `🔢 总消息数: ${totalCount} 条\n`;
     content += `✏️ 编辑次数: ${editCount} 次\n`;
     content += `👥 参与用户: ${uniqueUsers.join(', ')}\n`;
-    content += `⚠️ 说明: 因官方限制，无法记录已删除消息。\n`;
     content += `==================================================\n\n`;
     content += `[记录开始]\n\n`;
 
