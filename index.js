@@ -407,13 +407,46 @@ bot.action(/export_(group|user)_([\w@-]+)/, async (ctx) => {
 });
 
 // ==========================================
-// 6. 启动
+// 6. 启动 (修复版)
 // ==========================================
-initDB().then(() => {
-    bot.launch({ dropPendingUpdates: true }); // 尝试丢弃旧消息防止冲突
-    console.log('🚀 机器人终极版启动成功！');
+initDB().then(async () => {
+    try {
+        // 1. 强制清除旧的 Webhook (防止冲突)
+        await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+        console.log('🔄 已清除旧 Webhook...');
+
+        // 2. 启动机器人
+        await bot.launch({ 
+            dropPendingUpdates: true, // 丢弃积压的消息，防止启动卡顿
+            // 显式指定轮询参数，增加稳定性
+            polling: {
+                timeout: 30,
+                limit: 100
+            }
+        }); 
+        console.log('🚀 机器人终极版启动成功！');
+    } catch (e) {
+        console.error('❌ 启动失败:', e);
+    }
 });
 
+// 保持 Render 端口活跃
 const PORT = process.env.PORT || 10000;
-http.createServer((req, res) => { res.writeHead(200); res.end('OK'); }).listen(PORT);
-process.once('SIGINT', () => bot.stop('SIGINT'));
+http.createServer((req, res) => { 
+    res.writeHead(200); 
+    res.end('I am alive!'); 
+}).listen(PORT, () => {
+    console.log(`🌍 HTTP Server running on port ${PORT}`);
+});
+
+// 优雅退出 (这是解决 409 问题的关键)
+// Render 发送的是 SIGTERM，不是 SIGINT
+const stopBot = (signal) => {
+    console.log(`🛑 收到信号 ${signal}，正在关闭...`);
+    bot.stop(signal);
+    pool.end(); // 关闭数据库连接
+    process.exit(0);
+};
+
+process.once('SIGINT', () => stopBot('SIGINT'));
+process.once('SIGTERM', () => stopBot('SIGTERM'));
