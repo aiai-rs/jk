@@ -1,5 +1,5 @@
 /**
- * Telegram Logger Bot - 终极增强版 (报警系统 + 细粒度授权 + 丰富时长)
+ * Telegram Logger Bot - 终极增强版 (高级UI + 严格权限隔离)
  */
 
 require('dotenv').config();
@@ -25,14 +25,36 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// 统一的大键盘 (包含所有指令)
+// 统一的大键盘
 const MAIN_KEYBOARD = Markup.keyboard([
     ['/ck 查看日志', '/bz 指令菜单'],
     ['/cksq 授权管理', '/sc 清空数据']
 ]).resize().persistent();
 
 // ==========================================
-// 2. 数据库初始化
+// 2. 高级提示文案 (UI 美化部分)
+// ==========================================
+
+// 样式1：完全未授权
+const NO_AUTH_MSG = `
+⛔️ <b>访问被拒绝 (Access Denied)</b>
+
+你还没有获得授权，请授权后再试。
+
+👮‍♂️ <b>管理员:</b> @rrss0
+`;
+
+// 样式2：已授权但权限不足 (点了别的按钮)
+const LOW_PERM_MSG = `
+⛔️ <b>权限不足 (Permission Denied)</b>
+
+你没有操作该功能的权限，请联系管理员。
+
+👮‍♂️ <b>管理员:</b> @rrss0
+`;
+
+// ==========================================
+// 3. 数据库初始化
 // ==========================================
 async function initDB() {
     const client = await pool.connect();
@@ -69,17 +91,16 @@ async function initDB() {
 }
 
 // ==========================================
-// 3. 核心功能函数
+// 4. 核心功能函数
 // ==========================================
 
 // 警报系统：通知老板有未授权访问
 async function notifyAdminUnauthorized(ctx) {
-    // 防止自己触发报警
     if (ctx.from.id === ADMIN_ID) return;
 
     const u = ctx.from;
     const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-    const content = ctx.message ? (ctx.message.text || '[非文本消息]') : '[点击按钮/动作]';
+    const content = ctx.message ? (ctx.message.text || '[非文本消息]') : '[动作]';
 
     const alertMsg = `🚨 <b>未授权访问警告</b>\n\n` +
                      `👤 <b>用户:</b> ${u.first_name} ${u.last_name || ''}\n` +
@@ -90,9 +111,7 @@ async function notifyAdminUnauthorized(ctx) {
     
     try {
         await bot.telegram.sendMessage(ADMIN_ID, alertMsg, { parse_mode: 'HTML' });
-    } catch (e) {
-        console.error('发送警报失败:', e);
-    }
+    } catch (e) { console.error('警报发送失败', e); }
 }
 
 // 记录日志
@@ -122,7 +141,7 @@ async function getOldContent(msgId, chatId) {
     return res.rows[0] ? res.rows[0].content : '[无历史内容]';
 }
 
-// 检查授权 (核心逻辑)
+// 检查授权
 async function checkAuth(userId) {
     if (userId === ADMIN_ID) return true;
     const res = await pool.query('SELECT * FROM auth_sessions WHERE user_id = $1', [userId]);
@@ -136,22 +155,20 @@ async function checkAuth(userId) {
     return true;
 }
 
-// 检查用户是否在群里
+// 检查是否在群
 async function isUserInChat(userId, chatId) {
     if (userId === ADMIN_ID) return true;
     try {
         const member = await bot.telegram.getChatMember(chatId, userId);
         return !(member.status === 'left' || member.status === 'kicked');
-    } catch (e) {
-        return false;
-    }
+    } catch (e) { return false; }
 }
 
 // ==========================================
-// 4. 中间件 (全局拦截)
+// 5. 中间件 (全局拦截)
 // ==========================================
 
-// 1. 群消息记录 (最优先)
+// 1. 群消息记录
 bot.on('message', async (ctx, next) => {
     if (ctx.chat.type !== 'private') await logMessage(ctx, 'send');
     await next();
@@ -165,47 +182,38 @@ bot.on('edited_message', async (ctx, next) => {
     await next();
 });
 
-// 2. 私聊权限拦截与报警
+// 2. 私聊权限拦截
 bot.use(async (ctx, next) => {
-    // 只处理私聊的文本消息
     if (ctx.chat && ctx.chat.type === 'private' && ctx.message) {
         const userId = ctx.from.id;
         const isAuth = await checkAuth(userId);
 
         if (!isAuth) {
-            // 🚫 未授权用户：发送警报给老板，不回复用户(或者回复拒绝)
+            // 🚨 1. 报警给老板
             await notifyAdminUnauthorized(ctx);
-            // 可以选择完全不理，或者回复一句
-            // await ctx.reply('⛔️ 未授权访问。'); 
-            return; // 终止后续处理，指令也不会触发
+            // ⛔️ 2. 回复高级格式的拒绝信息
+            await ctx.reply(NO_AUTH_MSG, { parse_mode: 'HTML' });
+            return; // 拦截，不让继续
         }
     }
     await next();
 });
 
 // ==========================================
-// 5. 指令集
+// 6. 指令集
 // ==========================================
 
-// --- /start: 唤醒键盘 ---
+// --- /start: 唯一入口 ---
 bot.start(async (ctx) => {
-    // 能进来说明已经通过了中间件的 checkAuth (如果是私聊)
-    // 或者需要再次检查以防万一
-    if (await checkAuth(ctx.from.id)) {
-        await ctx.reply('👋 欢迎使用日志机器人，键盘已激活。', MAIN_KEYBOARD);
-    }
+    // 中间件已确保用户有授权
+    await ctx.reply('👋 欢迎回来，请使用下方键盘操作。', MAIN_KEYBOARD);
 });
 
-// --- /bz: 菜单 ---
-bot.command('bz', async (ctx) => {
-    await ctx.reply(`📜 **指令菜单**\n/ck - 查记录\n/start - 唤出键盘\n/rz ID - 查某人 (需权限)\n/sq ID - 授权 (老板用)\n/cksq - 管理授权 (老板用)\n/sc - 清空数据 (老板用)`, MAIN_KEYBOARD);
-});
-
-// --- /ck: 查日志 ---
+// --- /ck: 查日志 (授权用户唯一可用功能) ---
 bot.command('ck', async (ctx) => {
     const userId = ctx.from.id;
-    // 双重检查
-    if (!(await checkAuth(userId))) return;
+    // 权限检查在中件层其实已经做过，但为了安全保留
+    if (!(await checkAuth(userId))) return; 
 
     if (ctx.chat.type !== 'private') {
         return sendLogPage(ctx, 'group', ctx.chat.id, 1);
@@ -220,54 +228,91 @@ bot.command('ck', async (ctx) => {
     await ctx.reply('请选择要查看的群组:', Markup.inlineKeyboard(buttons));
 });
 
-// 点击查看群组 (权限核心)
-bot.action(/view_group_(-?\d+)/, async (ctx) => {
-    const userId = ctx.from.id;
-    const targetChatId = ctx.match[1];
+// --- 下面是“管理员独享”指令 (普通授权用户点击直接报错) ---
 
-    if (!(await checkAuth(userId))) return ctx.answerCbQuery('无权限');
-
-    // 🔥 检查是否在群
-    const canAccess = await isUserInChat(userId, targetChatId);
-    if (!canAccess) {
-        // 按照要求修改提示语
-        return ctx.answerCbQuery('你没有权限，如有疑问请联系管理员 @rrss0', { show_alert: true });
+// 统一的权限拦截器
+const adminOnly = async (ctx, next) => {
+    if (ctx.from.id !== ADMIN_ID) {
+        return ctx.reply(LOW_PERM_MSG, { parse_mode: 'HTML' });
     }
+    await next();
+};
 
-    await sendLogPage(ctx, 'group', targetChatId, 1);
+// 1. /bz 菜单 (普通用户点了报错)
+bot.command('bz', adminOnly, async (ctx) => {
+    await ctx.reply(`📜 **管理员菜单**\n/ck - 查记录\n/rz ID - 查某人\n/sq ID - 授权\n/cksq - 管理授权\n/sc - 清空数据`, MAIN_KEYBOARD);
 });
 
-// --- /sq: 授权 (多时间选项) ---
-bot.command('sq', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+// 2. /cksq 授权管理 (普通用户点了报错)
+bot.command('cksq', adminOnly, async (ctx) => {
+    const res = await pool.query('SELECT * FROM auth_sessions');
+    if (res.rows.length === 0) return ctx.reply('📂 无授权用户。');
+    const buttons = res.rows.map(u => [
+        Markup.button.callback(`❌ 撤销: ${u.user_id} (${u.is_permanent ? '永久' : '限时'})`, `revoke_${u.user_id}`)
+    ]);
+    await ctx.reply('📋 授权管理:', Markup.inlineKeyboard(buttons));
+});
+
+// 3. /sc 清空数据 (普通用户点了报错)
+bot.command('sc', adminOnly, async (ctx) => {
+    if (ctx.chat.type !== 'private') return ctx.reply('请私聊操作。');
+    const res = await pool.query('SELECT DISTINCT chat_id, chat_title FROM messages WHERE chat_id < 0');
+    if (res.rows.length === 0) return ctx.reply('📭 空数据库。');
+    const buttons = res.rows.map(g => [Markup.button.callback(`🗑️ 删除: ${g.chat_title}`, `pre_wipe_${g.chat_id}`)]);
+    await ctx.reply('⚠️ 选择要清空的群组:', Markup.inlineKeyboard(buttons));
+});
+
+// 4. /sq 授权指令 (普通用户点了没反应，因为需要参数，或者直接报错)
+bot.command('sq', adminOnly, async (ctx) => {
     const input = ctx.message.text.split(' ')[1];
     if (!input || !/^\d+$/.test(input)) return ctx.reply('❌ 格式: /sq 数字ID');
-    
     global.sqTarget = input;
-    
-    // 生成丰富的时间按钮
     const timeButtons = [
         [Markup.button.callback('1小时', 'auth_1h'), Markup.button.callback('3小时', 'auth_3h'), Markup.button.callback('6小时', 'auth_6h')],
         [Markup.button.callback('1天', 'auth_1d'), Markup.button.callback('3天', 'auth_3d'), Markup.button.callback('6天', 'auth_6d')],
         [Markup.button.callback('♾️ 永久', 'auth_perm')]
     ];
-
-    await ctx.reply(`🛡️ 正在授权给 ID: \`${input}\`\n请选择有效时长:`, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard(timeButtons)
-    });
+    await ctx.reply(`🛡️ 正在授权给 ID: \`${input}\`\n请选择有效时长:`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(timeButtons) });
 });
 
-// 处理授权时长
-bot.action(/auth_(.+)/, async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+// 5. /rz 查人 (管理员专用)
+bot.command('rz', adminOnly, async (ctx) => {
+    const input = ctx.message.text.split(' ')[1];
+    if (!input) return ctx.reply('用法: /rz ID');
+    await sendLogPage(ctx, 'user', input.replace('@', ''), 1);
+});
+
+// ==========================================
+// 7. 回调处理 (Action)
+// ==========================================
+
+// 查看群组 (授权用户可用，但必须在群内)
+bot.action(/view_group_(-?\d+)/, async (ctx) => {
+    const userId = ctx.from.id;
+    const targetChatId = ctx.match[1];
+
+    if (!(await checkAuth(userId))) return ctx.answerCbQuery('无权限'); // 双保险
+
+    const canAccess = await isUserInChat(userId, targetChatId);
+    if (!canAccess) {
+        // 🔥 试图看不在的群：弹窗报错
+        return ctx.answerCbQuery('⛔️ 你没有权限，如有疑问请联系管理员 @rrss0', { show_alert: true });
+    }
+    await sendLogPage(ctx, 'group', targetChatId, 1);
+});
+
+// 管理员操作回调拦截
+const adminAction = async (ctx, next) => {
+    if (ctx.from.id !== ADMIN_ID) return ctx.answerCbQuery('无权限');
+    await next();
+};
+
+bot.action(/auth_(.+)/, adminAction, async (ctx) => {
     const type = ctx.match[1];
     const targetId = global.sqTarget;
-    
     let expires = new Date();
     let isPerm = false;
     let text = '';
-
     switch(type) {
         case '1h': expires.setHours(expires.getHours() + 1); text = '1小时'; break;
         case '3h': expires.setHours(expires.getHours() + 3); text = '3小时'; break;
@@ -277,50 +322,18 @@ bot.action(/auth_(.+)/, async (ctx) => {
         case '6d': expires.setDate(expires.getDate() + 6); text = '6天'; break;
         case 'perm': isPerm = true; text = '永久'; break;
     }
-
-    await pool.query(
-        `INSERT INTO auth_sessions (user_id, authorized_by, expires_at, is_permanent) 
-         VALUES ($1, $2, $3, $4) 
-         ON CONFLICT (user_id) 
-         DO UPDATE SET expires_at=EXCLUDED.expires_at, is_permanent=EXCLUDED.is_permanent`, 
-        [targetId, ADMIN_ID, isPerm ? null : expires, isPerm]
-    );
-    
+    await pool.query(`INSERT INTO auth_sessions (user_id, authorized_by, expires_at, is_permanent) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO UPDATE SET expires_at=EXCLUDED.expires_at, is_permanent=EXCLUDED.is_permanent`, [targetId, ADMIN_ID, isPerm ? null : expires, isPerm]);
     await ctx.editMessageText(`✅ 已授权用户 \`${targetId}\`\n⏳ 时长: ${text}`, { parse_mode: 'Markdown' });
 });
 
-// --- /cksq: 撤销授权 (保持原样) ---
-bot.command('cksq', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
-    const res = await pool.query('SELECT * FROM auth_sessions');
-    if (res.rows.length === 0) return ctx.reply('📂 无授权用户。');
-
-    const buttons = res.rows.map(u => [
-        Markup.button.callback(`❌ 撤销: ${u.user_id} (${u.is_permanent ? '永久' : '限时'})`, `revoke_${u.user_id}`)
-    ]);
-    await ctx.reply('📋 授权管理:', Markup.inlineKeyboard(buttons));
-});
-
-bot.action(/revoke_(\d+)/, async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+bot.action(/revoke_(\d+)/, adminAction, async (ctx) => {
     const targetId = ctx.match[1];
     await pool.query('DELETE FROM auth_sessions WHERE user_id = $1', [targetId]);
     await ctx.answerCbQuery('已撤销');
     await ctx.editMessageText(`✅ 用户 ${targetId} 授权已取消。`);
 });
 
-// --- /sc: 清除数据 (保持原样) ---
-bot.command('sc', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
-    if (ctx.chat.type !== 'private') return ctx.reply('请私聊操作。');
-    const res = await pool.query('SELECT DISTINCT chat_id, chat_title FROM messages WHERE chat_id < 0');
-    if (res.rows.length === 0) return ctx.reply('📭 空数据库。');
-    const buttons = res.rows.map(g => [Markup.button.callback(`🗑️ 删除: ${g.chat_title}`, `pre_wipe_${g.chat_id}`)]);
-    await ctx.reply('⚠️ 选择要清空的群组:', Markup.inlineKeyboard(buttons));
-});
-
-bot.action(/pre_wipe_(-?\d+)/, async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+bot.action(/pre_wipe_(-?\d+)/, adminAction, async (ctx) => {
     const chatId = ctx.match[1];
     await ctx.editMessageText(`🛑 确定清空 ID \`${chatId}\` 的记录吗？不可恢复！`, {
         parse_mode: 'Markdown',
@@ -328,35 +341,20 @@ bot.action(/pre_wipe_(-?\d+)/, async (ctx) => {
     });
 });
 
-bot.action(/do_wipe_(-?\d+)/, async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+bot.action(/do_wipe_(-?\d+)/, adminAction, async (ctx) => {
     await pool.query('DELETE FROM messages WHERE chat_id = $1', [ctx.match[1]]);
     await ctx.editMessageText(`✅ 数据已清空。`);
 });
 bot.action('cancel_action', (ctx) => ctx.deleteMessage());
 
-// --- /rz: 查某人 ---
-bot.command('rz', async (ctx) => {
-    if (!(await checkAuth(ctx.from.id))) return; // 中间件已经拦截了，这里双保险
-    const input = ctx.message.text.split(' ')[1];
-    if (!input) return ctx.reply('用法: /rz ID');
-    if (ctx.from.id !== ADMIN_ID) bot.telegram.sendMessage(ADMIN_ID, `🔔 监控: ${ctx.from.id} 查了 ${input}`).catch(()=>{});
-    await sendLogPage(ctx, 'user', input.replace('@', ''), 1);
-});
-
-// --- 日志翻页 ---
+// 翻页通用
 async function sendLogPage(ctx, type, target, page) {
     const limit = 10;
     const offset = (page - 1) * limit;
     let sql = `SELECT * FROM messages WHERE `;
     let params = [];
-
-    if (type === 'group') {
-        sql += `chat_id = $1`; params.push(target);
-    } else {
-        if (/^\d+$/.test(target)) { sql += `user_id = $1`; params.push(target); }
-        else { sql += `username = $1`; params.push(target); }
-    }
+    if (type === 'group') { sql += `chat_id = $1`; params.push(target); }
+    else { if (/^\d+$/.test(target)) { sql += `user_id = $1`; params.push(target); } else { sql += `username = $1`; params.push(target); } }
     sql += ` ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
 
     const res = await pool.query(sql, params);
@@ -365,7 +363,6 @@ async function sendLogPage(ctx, type, target, page) {
     
     let text = `📂 <b>${title}</b> (第 ${page} 页)\n\n`;
     if (res.rows.length === 0) text += "无记录。";
-    
     res.rows.forEach(l => {
         const time = new Date(l.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
         const name = l.first_name || '无名';
@@ -373,19 +370,13 @@ async function sendLogPage(ctx, type, target, page) {
         else text += `💬 <b>${name}</b> [${time}]:\n${l.content}\n\n`;
     });
 
-    const buttons = [[
-        Markup.button.callback('⬅️', `page_${type}_${target}_${page - 1}`),
-        Markup.button.callback('⬇️ TXT', `export_${type}_${target}`),
-        Markup.button.callback('➡️', `page_${type}_${target}_${page + 1}`)
-    ]];
-
+    const buttons = [[Markup.button.callback('⬅️', `page_${type}_${target}_${page - 1}`), Markup.button.callback('⬇️ TXT', `export_${type}_${target}`), Markup.button.callback('➡️', `page_${type}_${target}_${page + 1}`)]];
     if (ctx.callbackQuery) try { await ctx.editMessageText(text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) }); } catch(e){}
     else await ctx.reply(text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) });
 }
 
 bot.action(/page_(group|user)_([\w@-]+)_(-?\d+)/, async (ctx) => {
-    let page = parseInt(ctx.match[3]);
-    if (page < 1) page = 1;
+    let page = parseInt(ctx.match[3]); if (page < 1) page = 1;
     await sendLogPage(ctx, ctx.match[1], ctx.match[2], page);
 });
 
@@ -404,7 +395,7 @@ bot.action(/export_(group|user)_([\w@-]+)/, async (ctx) => {
 });
 
 // ==========================================
-// 6. 启动 (防冲突版)
+// 8. 启动
 // ==========================================
 initDB().then(async () => {
     try {
@@ -417,12 +408,6 @@ initDB().then(async () => {
 
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => { res.writeHead(200); res.end('OK'); }).listen(PORT);
-
-const stopBot = (signal) => {
-    console.log(`🛑 ${signal} 关闭...`);
-    bot.stop(signal);
-    pool.end();
-    process.exit(0);
-};
+const stopBot = (signal) => { console.log(`🛑 ${signal}`); bot.stop(signal); pool.end(); process.exit(0); };
 process.once('SIGINT', () => stopBot('SIGINT'));
 process.once('SIGTERM', () => stopBot('SIGTERM'));
