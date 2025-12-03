@@ -30,9 +30,9 @@ const fileWaitList = new Set();
 let globalSqTarget = null;
 
 const MAIN_KEYBOARD = Markup.keyboard([
-    ['查看发言日志', '指令菜单'],
-    ['ID查询', '文件转图片'],
-    ['授权管理', '数据库检测']
+     ['/ck 查看日志', '/bz 指令菜单'],
+    ['/id ID查询', '/img 转图片模式'],
+    ['/cksq 授权管理', '/sj 数据检测']
 ]).resize().persistent();
 
 const NO_AUTH_MSG = `
